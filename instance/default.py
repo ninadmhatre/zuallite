@@ -27,6 +27,7 @@ SESSION_TIMEOUT = timedelta(minutes=240)
 GIT_HUB = 'https://github.com/ninadmhatre'
 LINKED_IN = 'https://linkedin.com/in/ninadmhatre'
 EXTERNAL_BLOG = 'https://dev.to/ninadmhatre'
+EXERCISM_RUST = 'https://exercism.org/profiles/ninadmhatre/solutions?track_slug=rust'
 PERSONAL_EMAIL = ADMIN_MAIL
 
 # Upload Folder
