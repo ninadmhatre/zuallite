@@ -1,0 +1,45 @@
+[Unit]
+Description=Zual Lite (Flask portfolio)
+Documentation=https://github.com/ninadmhatre/zuallite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=zuallite
+Group=zuallite
+WorkingDirectory=/srv/zuallite
+Environment=APP_ENVIRONMENT=prod
+EnvironmentFile=-/etc/zuallite.env
+# --no-control-socket: gunicorn 26 otherwise tries to create a unix socket
+# under $HOME (/srv/zuallite), which ProtectSystem=strict makes read-only.
+# We do not use the control interface, so drop it rather than punch a hole.
+ExecStart=/srv/zuallite/.venv/bin/gunicorn \
+    --workers 2 \
+    --bind 127.0.0.1:8000 \
+    --no-control-socket \
+    --access-logfile - \
+    --error-logfile - \
+    wsgi:app
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Hardening. The app only reads from its working directory and writes nothing,
+# so it can run with almost everything locked down.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
