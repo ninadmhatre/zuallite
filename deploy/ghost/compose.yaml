@@ -1,0 +1,57 @@
+# Ghost 6 + MySQL 8.4 LTS.
+#
+# Run on the host as: docker compose -f /opt/ghost/compose.yaml up -d
+# Secrets and BLOG_DOMAIN come from /opt/ghost/.env (mode 600), which
+# provision-ghost.sh generates.
+#
+# Why containers rather than ghost-cli: ghost-cli gates its nginx/systemd/SSL
+# setup on Ubuntu and refuses to do it on Debian, and Debian 13's repos carry
+# no mysql-8.0. Pinned images sidestep both, and TLS stays on the host with
+# certbot -- the same place the Flask app's cert lives.
+
+services:
+  ghost:
+    image: ghost:6-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Ghost builds absolute URLs from this, so it must be the public https URL.
+      url: https://${BLOG_DOMAIN}
+      NODE_ENV: production
+      database__client: mysql
+      database__connection__host: db
+      database__connection__port: "3306"
+      database__connection__user: ghost
+      database__connection__password: ${GHOST_DB_PASSWORD}
+      database__connection__database: ghost
+    volumes:
+      # Themes, images, and adapters. Back this up along with a mysqldump.
+      - ghost-content:/var/lib/ghost/content
+    # Loopback only -- host nginx terminates TLS and proxies in.
+    ports:
+      - "127.0.0.1:2368:2368"
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    # No published ports: reachable only from the ghost container.
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ghost
+      MYSQL_USER: ghost
+      MYSQL_PASSWORD: ${GHOST_DB_PASSWORD}
+    volumes:
+      - ghost-db:/var/lib/mysql
+    healthcheck:
+      # Ghost's depends_on waits on this; MySQL's first-run init is slow.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "--password=${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+volumes:
+  ghost-content:
+  ghost-db:
