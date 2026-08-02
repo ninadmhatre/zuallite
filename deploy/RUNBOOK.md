@@ -9,61 +9,66 @@ Stands the Flask portfolio up on a netcup VPS, adds a Ghost blog on
 | Price | €5.91/mo incl. 19% VAT (≈ $6.9) |
 | IPv4 | `185.233.104.40` |
 | IPv6 | from `2a03:4000:24:2fe::/64` — **confirm the actual address on the box** |
-| OS | Ubuntu 24.04 LTS (**reinstall required** — netcup shipped Debian 13) |
+| OS | Debian 13 (trixie) |
+| DNS | Namecheap BasicDNS (`dns1`/`dns2.registrar-servers.com`) |
 | `ninadmhatre.com` + `www` | Flask app, gunicorn behind nginx |
-| `blog.ninadmhatre.com` | Ghost 6, Node 22 + MySQL 8 |
+| `blog.ninadmhatre.com` | Ghost 6 + MySQL 8.4 in containers, behind the same nginx |
 
 ---
 
 ## 0. State of play
 
-Three things differ from a normal migration — read these before starting.
+**DNS is already live.** Namecheap BasicDNS is authoritative and all three A
+records resolve to `185.233.104.40` at a 300s TTL. The old DigitalOcean zone is
+gone and the droplet is destroyed, so there is **no rollback target** — but also
+no cutover choreography to get wrong.
 
-**The domain is already dark.** `ninadmhatre.com` is delegated to
-`ns{1,2,3}.digitalocean.com`, and all three answer `REFUSED` — DigitalOcean no
-longer holds the zone. Nothing resolves today.
+Two carried-over notes:
 
-Consequences:
+- Switching to BasicDNS auto-provisioned **Namecheap email forwarding** (five
+  `eforward*.registrar-servers.com` MX records plus a matching SPF TXT). Either
+  configure a forwarding address or delete all five MX records and replace the
+  SPF with `v=spf1 -all`. Don't do half of each, and never add a second SPF
+  record — two is a permerror.
+- The IPv6 address from netcup's panel was link-local (`fe80::…`) and unusable.
+  Get the real one with `ip -6 addr show scope global`. **If none is
+  configured, publish no AAAA records at all** — an AAAA that doesn't answer is
+  worse than none.
 
-- No TTL-lowering step, no propagation window, no cutover choreography, and
-  **no rollback to DigitalOcean**. This is a greenfield DNS build.
-- Whatever was in that zone is unrecoverable from here. **If the domain ever
-  carried MX / SPF / DKIM / DMARC records, email is already broken** and you
-  must recreate them from your mail provider's setup docs. Check this — it is
-  the one thing that won't announce itself when the website comes back up.
-- Because nothing resolves, HSTS is moot and certbot's HTTP-01 challenge will
-  work as soon as DNS points at the new box.
+**Ghost runs in containers, not via ghost-cli.** On Debian 13 that's the clean
+path: `ghost-cli` gates its nginx/systemd/SSL setup on Ubuntu and skips it on
+Debian, and Debian's repos carry no `mysql-8.0`. Pinned `ghost:6-alpine` and
+`mysql:8.4` images sidestep both. TLS still terminates on the host with
+certbot, next to the Flask app's certificate.
 
-**The box is Debian 13, not Ubuntu.** `provision.sh` and `provision-ghost.sh`
-target Ubuntu 24.04. Ghost requires MySQL 8 (Debian ships MariaDB, and MySQL 8
-is not in Debian's repos) and officially supports Ubuntu 22.04/24.04 only.
-Reinstall before doing anything else — see step 1.
+This stack was booted and verified before writing this runbook —
+`ghost:6-alpine` (6.55) against `mysql:8.4` (8.4.11): migrations ran, and the
+homepage, `/rss/` and `/ghost/` all returned 200 behind a simulated nginx
+proxy. Resident memory was ~197 MB for Ghost and ~478 MB for MySQL, so roughly
+700 MB for the blog on top of ~60 MB for Flask. Comfortable on 4 GB.
 
-**The IPv6 address you have is link-local.** `fe80::…` cannot be routed or put
-in DNS. The routable range is `2a03:4000:24:2fe::/64`; get the configured
-address off the box in step 2.
+Two behaviours worth knowing:
+
+- Ghost 6 calls **its own public HTTPS URL** at boot to initialise ActivityPub
+  (fediverse publishing). `provision-ghost.sh` therefore restarts the container
+  once certbot has issued — before that, the first boot logs `ECONNREFUSED` and
+  skips ActivityPub. Harmless, and handled.
+- No `mysql_native_password` deprecation warning appeared with these versions,
+  despite reports of it elsewhere. Nothing to ignore.
+
+If you don't want the blog federating to Mastodon and friends, turn ActivityPub
+off in **Settings → Social web** after setup.
 
 ---
 
-## 1. Reinstall as Ubuntu 24.04
-
-netcup **SCP** (Server Control Panel, not CCP) → your VPS → *Media* →
-*Images* → **Ubuntu 24.04 LTS** → install.
-
-The box is empty, so there is nothing to preserve. Takes a few minutes and the
-root password is reset — netcup shows the new one in SCP.
-
-> Doing this on Debian instead means sourcing MySQL 8 from Oracle's apt repo
-> and running ghost-cli against an unsupported stack. Not worth it.
-
-## 2. Harden SSH, confirm the box
+## 1. Harden SSH, confirm the box
 
 ```bash
 ssh root@185.233.104.40
 
-lsb_release -a                 # expect Ubuntu 24.04
-free -h                        # expect ~4 GB; note whether swap exists
-ip -6 addr show scope global   # <-- your real IPv6, record it for step 4
+cat /etc/os-release              # expect Debian 13 (trixie)
+free -h                          # expect ~4 GB; note whether swap exists
+ip -6 addr show scope global     # <-- your real IPv6, record it for step 3
 ```
 
 Install your key, then stop using the emailed password:
@@ -73,7 +78,7 @@ Install your key, then stop using the emailed password:
 ssh-copy-id root@185.233.104.40
 ```
 
-Back on the box, edit `/etc/ssh/sshd_config`:
+Back on the box, in `/etc/ssh/sshd_config`:
 
 ```
 PermitRootLogin prohibit-password
@@ -84,10 +89,10 @@ PasswordAuthentication no
 systemctl restart ssh
 ```
 
-> Keep your current session open and verify a *second* SSH session works before
+> Keep the current session open and verify a *second* SSH session works before
 > closing it. This is the easiest way to lock yourself out of a fresh box.
 
-## 3. Provision the Flask app
+## 2. Provision the Flask app
 
 Generate the CI keypair on your laptop first (no passphrase — Actions can't
 type one):
@@ -96,109 +101,64 @@ type one):
 ssh-keygen -t ed25519 -f ~/.ssh/zuallite_deploy -C "github-actions-zuallite" -N ""
 ```
 
-Then on the server:
+Then on the server — DNS already resolves, so certbot runs in the same pass:
 
 ```bash
 DOMAIN=ninadmhatre.com \
 DEPLOY_PUBKEY="$(cat ~/.ssh/zuallite_deploy.pub)" \
-SKIP_CERTBOT=1 \
   bash <(curl -fsSL https://raw.githubusercontent.com/ninadmhatre/zuallite/main/deploy/provision.sh)
 ```
 
-`SKIP_CERTBOT=1` because Let's Encrypt cannot validate a domain that doesn't
-resolve yet. You re-run without it in step 5.
+This installs nginx, ufw, fail2ban, unattended-upgrades and uv; creates the
+`zuallite` service user; clones the repo to `/srv/zuallite`; installs the
+systemd unit; and requests a certificate for the apex and `www`.
 
-Verify before touching DNS, by faking resolution:
-
-```bash
-curl -sI --resolve ninadmhatre.com:80:185.233.104.40 http://ninadmhatre.com/
-curl -s  --resolve ninadmhatre.com:80:185.233.104.40 http://ninadmhatre.com/ \
-  | grep -o '<title>.*</title>'
-```
-
-Expect `HTTP/1.1 200` and `<title>Ninad Mhatre - Portfolio</title>`.
-
-## 4. Build the DNS zone
-
-The old zone is gone, so pick a host and create it fresh.
-[Cloudflare's free tier](https://dash.cloudflare.com) is the sensible landing
-spot: free, fast, good API, and it decouples DNS from whoever runs your compute
-— which is exactly the coupling that just bit you.
-
-Create the zone, add the records, **then** change the nameservers at your
-registrar away from `ns{1,2,3}.digitalocean.com`.
-
-| Type | Name | Value | TTL |
-| --- | --- | --- | --- |
-| A | `@` | `185.233.104.40` | 300 |
-| AAAA | `@` | *(your global v6 from step 2)* | 300 |
-| A | `www` | `185.233.104.40` | 300 |
-| A | `blog` | `185.233.104.40` | 300 |
-| AAAA | `blog` | *(your global v6)* | 300 |
-
-Skip the AAAA records entirely if IPv6 isn't configured on the box — a
-published AAAA that doesn't answer makes the site look broken to v6-capable
-clients, which is worse than having no AAAA at all.
-
-**Recreate any mail records** (MX, SPF `TXT`, DKIM `TXT`, DMARC `TXT`) from
-your mail provider's docs. Nothing in the old zone survives.
-
-If you use Cloudflare, keep the records **DNS-only (grey cloud)** until certbot
-has issued — the orange-cloud proxy intercepts the HTTP-01 challenge.
-
-Watch it land:
+Verify:
 
 ```bash
-watch -n5 'dig +short ninadmhatre.com; dig +short blog.ninadmhatre.com'
-```
-
-Registrar nameserver changes can take a couple of hours to show up at the
-registry, independent of your TTLs.
-
-## 5. Issue certificates
-
-Once `dig` returns `185.233.104.40`:
-
-```bash
-DOMAIN=ninadmhatre.com bash /srv/zuallite/deploy/provision.sh
-```
-
-certbot rewrites the nginx vhost with TLS and the HTTP→HTTPS redirect, and
-installs a renewal timer.
-
-```bash
-curl -sI https://ninadmhatre.com/ | head -1
+curl -sI https://ninadmhatre.com/ | head -1        # 200
+curl -sI http://ninadmhatre.com/  | head -1        # 301 → https
+systemctl is-active zuallite
 systemctl list-timers certbot.timer
 ```
 
-## 6. Install Ghost
+## 3. Add AAAA records (only if IPv6 exists)
 
-Only once `blog.ninadmhatre.com` resolves — ghost-cli requests its own
-certificate during install.
+If step 1 returned a global `2a03:4000:24:2fe::…` address, add it in Namecheap
+→ Advanced DNS as `AAAA Record` for `@`, `www` and `blog`, TTL 5 min. Skip
+entirely otherwise.
+
+## 4. Install Ghost
+
+`blog.ninadmhatre.com` already resolves, so this can run straight away:
 
 ```bash
 BLOG_DOMAIN=blog.ninadmhatre.com bash /srv/zuallite/deploy/provision-ghost.sh
 ```
 
-Then follow the printed instructions to run `ghost install` and create your
-admin account at `https://blog.ninadmhatre.com/ghost/`.
+This adds a 2 GB swapfile, installs Docker CE from Docker's `trixie` repo,
+writes `/opt/ghost/` with generated DB credentials, brings up Ghost and MySQL,
+proxies them through nginx and requests a certificate.
 
-For a read-only blog, in Ghost Admin:
+Then **immediately** open `https://blog.ninadmhatre.com/ghost/` and create the
+owner account — the first visitor to that URL claims it.
+
+Make it read-only:
 
 - **Settings → Comments** → `Nobody`
 - **Settings → Membership** → turn off subscription access / the portal popup
 - **Settings → Access** → `Public`
 
-Publish dates render by default in Ghost's stock Source theme.
+Publish dates render by default in the stock Source theme.
 
 Point the portfolio at it by changing `EXTERNAL_BLOG` in `instance/default.py`
-from dev.to to `https://blog.ninadmhatre.com`.
+from dev.to to `https://blog.ninadmhatre.com`, then push to `main`.
 
-To bring your dev.to posts across: dev.to exports articles as JSON under
-*Settings → Extensions → Export content*; Ghost imports under *Settings →
-Import content*. Do this before you advertise the new URL.
+To bring dev.to posts across: dev.to exports articles as JSON under *Settings →
+Extensions → Export content*; Ghost imports under *Settings → Import content*.
+Do this before you advertise the new URL.
 
-## 7. Wire up GitHub Actions
+## 5. Wire up GitHub Actions
 
 Repo → **Settings → Secrets and variables → Actions**:
 
@@ -212,8 +172,6 @@ Repo → **Settings → Secrets and variables → Actions**:
 Pinning `DEPLOY_KNOWN_HOSTS` instead of `StrictHostKeyChecking=no` is what
 stops the runner handing your deploy key to whatever answers on that IP.
 
-Test end to end:
-
 ```bash
 gh workflow run "Deploy to production"
 gh run watch
@@ -222,7 +180,10 @@ gh run watch
 Every push to `main` now deploys. `deploy/remote-deploy.sh` health-checks the
 new revision and **reverts to the previous commit** if it fails to serve.
 
-## 8. Verify
+Note this pipeline deploys the Flask app only. Ghost is upgraded by bumping its
+image tag (see below).
+
+## 6. Verify
 
 ```bash
 curl -sI https://ninadmhatre.com/            # 200
@@ -233,23 +194,16 @@ curl -s  https://ninadmhatre.com/nope        # 404 JSON
 curl -sI https://ninadmhatre.com/static/css/styles.css   # 200 + Cache-Control
 ```
 
-Check the certificate covers both apex and `www`:
+Certificates cover what you think they do:
 
 ```bash
-echo | openssl s_client -connect ninadmhatre.com:443 -servername ninadmhatre.com 2>/dev/null \
-  | openssl x509 -noout -dates -ext subjectAltName
+for h in ninadmhatre.com blog.ninadmhatre.com; do
+  echo | openssl s_client -connect $h:443 -servername $h 2>/dev/null \
+    | openssl x509 -noout -subject -dates -ext subjectAltName
+done
 ```
 
-## 9. Close out DigitalOcean
-
-There is no rollback path to DO (the zone is already gone), so this is just
-billing hygiene:
-
-1. Snapshot the droplet if you want anything off its disk.
-2. Destroy the droplet.
-3. Confirm the DO billing page shows $0 pending for next month.
-
-Raise the DNS TTLs to 3600 once you're happy with the new setup.
+Then raise the DNS TTLs from 5 min to Automatic if you want.
 
 ---
 
@@ -258,12 +212,41 @@ Raise the DNS TTLs to 3600 once you're happy with the new setup.
 ```bash
 systemctl status zuallite          # Flask app
 journalctl -u zuallite -f          # its logs (gunicorn logs to stdout)
-sudo -u ghostadmin ghost status    # from /var/www/blog
 ```
 
-The systemd unit runs gunicorn with `ProtectSystem=strict` on a read-only
+Ghost — every command needs both flags, since the secrets live in `.env`:
+
+```bash
+cd /opt/ghost
+docker compose --env-file .env ps
+docker compose --env-file .env logs -f ghost
+docker compose --env-file .env restart ghost
+```
+
+**Upgrading Ghost:** back up first (below), bump the `ghost:6-alpine` tag in
+`/opt/ghost/compose.yaml`, then `docker compose --env-file .env up -d`.
+
+**Backups.** Two things matter — the content volume and the database:
+
+```bash
+cd /opt/ghost
+# database
+docker compose --env-file .env exec -T db \
+  mysqldump -u root --password="$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2)" \
+  --single-transaction ghost > ~/ghost-db-$(date +%F).sql
+# content (themes, images)
+docker run --rm -v ghost_ghost-content:/c -v "$HOME":/out alpine \
+  tar czf /out/ghost-content-$(date +%F).tar.gz -C /c .
+```
+
+Keep `/opt/ghost/.env` safe — regenerating those credentials orphans the MySQL
+volume, and `provision-ghost.sh` deliberately refuses to overwrite it.
+
+**Docker and ufw:** Docker bypasses ufw for published ports, but the compose
+file binds Ghost to `127.0.0.1:2368` and publishes nothing for MySQL, so
+neither is reachable from outside. If you ever change those bindings, that
+protection goes with them.
+
+The Flask systemd unit runs gunicorn with `ProtectSystem=strict` on a read-only
 filesystem — the app writes nothing. If you later add something that needs
 disk, add an explicit `ReadWritePaths=` rather than relaxing the unit.
-
-Ghost majors (`ghost update --major`) need a manual run roughly yearly. Node
-and MySQL come from apt and unattended-upgrades covers security patches only.

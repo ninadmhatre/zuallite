@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# One-shot provisioning for a fresh Ubuntu 24.04 box (netcup VPS 500 G12).
-# Sets up the Flask portfolio app only -- run provision-ghost.sh afterwards
-# for the blog.
+# One-shot provisioning for a fresh Debian 13 or Ubuntu 24.04 box
+# (netcup VPS 500 G12). Sets up the Flask portfolio app only -- run
+# provision-ghost.sh afterwards for the blog.
 #
 # Usage (as root on the new server):
 #   DOMAIN=example.com ./provision.sh
@@ -31,7 +31,13 @@ apt-get install -y -qq \
     unattended-upgrades certbot python3-certbot-nginx
 
 log "Enabling unattended security upgrades"
-dpkg-reconfigure -f noninteractive unattended-upgrades
+# Written explicitly rather than via `dpkg-reconfigure -f noninteractive`,
+# which is a no-op on Debian (it only enables the timers on Ubuntu).
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+systemctl enable --now unattended-upgrades
 
 log "Configuring firewall"
 ufw allow OpenSSH
