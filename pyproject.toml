@@ -7,3 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "flask>=3.1.0",
 ]
+
+[project.optional-dependencies]
+# Installed on the server only: `uv sync --extra prod`
+prod = [
+    "gunicorn>=23.0.0",
+]
