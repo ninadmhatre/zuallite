@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 #
-# Runs ON THE SERVER, piped in over SSH by .github/workflows/deploy.yml.
-# Rolls itself back if the new revision fails its health check.
+# Deploys the Flask app: pull, sync deps, restart, health-check.
+# Rolls back to the previous commit if the new revision fails to serve.
+#
+# Normally piped in over SSH by .github/workflows/deploy.yml, but it also
+# runs standalone on the box:
+#   sudo -u zuallite bash /srv/zuallite/deploy/deploy.sh
+#
+# This touches the Flask app only -- the blog is managed by update.sh.
 
 set -euo pipefail
 

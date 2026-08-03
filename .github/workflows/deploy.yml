@@ -49,7 +49,7 @@ jobs:
           esac
 
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
-              "zuallite@${host}" 'bash -s' < deploy/remote-deploy.sh
+              "zuallite@${host}" 'bash -s' < deploy/deploy.sh
 
       - name: Verify public endpoint
         env:
