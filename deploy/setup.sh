@@ -213,22 +213,46 @@ if [[ -z "$(ls -A "$WF_DIR/keys" 2>/dev/null)" ]]; then
     (cd "$WF_DIR" && wf keys generate)
 fi
 
-WF_CREDS_FILE="/root/writefreely-admin-credentials.txt"
 if [[ ! -f "$WF_DIR/writefreely.db" ]]; then
     log "Initialising WriteFreely database"
     (cd "$WF_DIR" && wf db init)
+fi
 
+# Guarded separately from the database. These used to share one `if`, so a run
+# that died between `db init` and `user create` left a database with no admin
+# -- and every re-run then skipped the whole block, because the db file
+# existed. There was no way out except creating the user by hand.
+WF_CREDS_FILE="/root/writefreely-admin-credentials.txt"
+WF_ADMIN_MARKER="$WF_DIR/.admin-created"
+if [[ ! -f "$WF_ADMIN_MARKER" ]]; then
+    log "Creating blog admin '${WF_ADMIN_USER}'"
     wf_pass="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)"
-    (cd "$WF_DIR" && wf user create --admin "${WF_ADMIN_USER}:${wf_pass}")
 
-    umask 077
-    cat > "$WF_CREDS_FILE" <<EOF
+    if (cd "$WF_DIR" && wf user create --admin "${WF_ADMIN_USER}:${wf_pass}"); then
+        umask 077
+        cat > "$WF_CREDS_FILE" <<EOF
 WriteFreely admin
 url:      https://${BLOG_DOMAIN}/login
 username: ${WF_ADMIN_USER}
 password: ${wf_pass}
 EOF
-    chmod 600 "$WF_CREDS_FILE"
+        chmod 600 "$WF_CREDS_FILE"
+        touch "$WF_ADMIN_MARKER"
+        chown "$WF_USER:$WF_USER" "$WF_ADMIN_MARKER"
+    else
+        # Most likely the user already exists from an earlier partial run.
+        cat >&2 <<EOF
+
+!! Could not create admin '${WF_ADMIN_USER}'. If it already exists, set a
+!! password you know with:
+!!
+!!   cd ${WF_DIR}
+!!   sudo -u ${WF_USER} ./writefreely -c config.ini user reset-pass ${WF_ADMIN_USER}
+!!
+!! Then: touch ${WF_ADMIN_MARKER}   (so future runs skip this step)
+
+EOF
+    fi
 fi
 
 log "Installing writefreely.service"
