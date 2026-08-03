@@ -26,6 +26,25 @@ services:
       database__connection__user: ghost
       database__connection__password: ${GHOST_DB_PASSWORD}
       database__connection__database: ghost
+
+      # Ghost 5.118+ emails a 6-digit code when a staff user signs in from an
+      # unrecognised device. With no mail transport that locks you out of your
+      # own admin. Set GHOST_STAFF_DEVICE_VERIFICATION=false in .env to bypass
+      # it -- but only as a stopgap: this blog is on the public internet, and
+      # with it off a leaked password is the only thing between an attacker and
+      # your admin panel. Configure SMTP below, then set it back to true.
+      security__staffDeviceVerification: "${GHOST_STAFF_DEVICE_VERIFICATION:-true}"
+
+      # Mail. Defaults to Ghost's "Direct" transport, which almost never
+      # delivers from a VPS (residential/cloud IPs are blocked, no rDNS/SPF).
+      # Set MAIL_TRANSPORT=SMTP plus the SMTP_* vars in .env to use a relay.
+      mail__transport: "${MAIL_TRANSPORT:-Direct}"
+      mail__from: "${MAIL_FROM:-noreply@ninadmhatre.com}"
+      mail__options__host: "${SMTP_HOST:-}"
+      mail__options__port: "${SMTP_PORT:-587}"
+      mail__options__secure: "${SMTP_SECURE:-false}"
+      mail__options__auth__user: "${SMTP_USER:-}"
+      mail__options__auth__pass: "${SMTP_PASS:-}"
     volumes:
       # Themes, images, and adapters. Back this up along with a mysqldump.
       - ghost-content:/var/lib/ghost/content
